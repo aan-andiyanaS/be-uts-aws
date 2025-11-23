@@ -1,5 +1,9 @@
 import db from "../config/db.js";
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import {
+  S3Client,
+  PutObjectCommand,
+  DeleteObjectCommand,
+} from "@aws-sdk/client-s3";
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -25,6 +29,28 @@ const uploadToS3 = async (file) => {
   );
 
   return `https://${process.env.S3_BUCKET}.s3.amazonaws.com/${key}`;
+};
+
+const parseS3KeyFromUrl = (url) => {
+  if (!url) return null;
+  try {
+    const { pathname, host } = new URL(url);
+    if (!host.includes(process.env.S3_BUCKET)) return null;
+    return pathname.replace(/^\//, "");
+  } catch {
+    return null;
+  }
+};
+
+const deleteFromS3 = async (url) => {
+  const key = parseS3KeyFromUrl(url);
+  if (!key) return;
+  await s3.send(
+    new DeleteObjectCommand({
+      Bucket: process.env.S3_BUCKET,
+      Key: key,
+    })
+  );
 };
 
 const normalizeImages = (value) => {
@@ -119,9 +145,57 @@ export const deleteProduct = async (req, res) => {
   try {
     const { id } = req.params;
 
+    // Hapus gambar di S3 jika ada
+    const [existingRows] = await db.execute(
+      "SELECT image_url FROM products WHERE id=?",
+      [id]
+    );
+    const existingImages = normalizeImages(existingRows?.[0]?.image_url);
+    if (existingImages.length) {
+      await Promise.all(existingImages.map(deleteFromS3));
+    }
+
     await db.execute("DELETE FROM products WHERE id=?", [id]);
 
     res.json({ msg: "Product deleted" });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const deleteProductImage = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { imageUrl } = req.body;
+
+    if (!imageUrl) {
+      return res.status(400).json({ msg: "imageUrl is required" });
+    }
+
+    const [rows] = await db.execute(
+      "SELECT image_url FROM products WHERE id=?",
+      [id]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ msg: "Product not found" });
+    }
+
+    const images = normalizeImages(rows[0].image_url);
+    const filtered = images.filter((img) => img !== imageUrl);
+
+    if (filtered.length === images.length) {
+      return res.status(404).json({ msg: "Image not found in product" });
+    }
+
+    await deleteFromS3(imageUrl);
+
+    await db.execute("UPDATE products SET image_url=? WHERE id=?", [
+      JSON.stringify(filtered),
+      id,
+    ]);
+
+    res.json({ msg: "Image deleted", images: filtered });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
