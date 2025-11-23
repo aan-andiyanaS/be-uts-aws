@@ -1,15 +1,19 @@
 import express from "express";
-import { getProducts, createProduct, updateProduct, deleteProduct } from "../controllers/productController.js";
+import {
+  getProducts,
+  createProduct,
+  updateProduct,
+  deleteProduct,
+} from "../controllers/productController.js";
 import verifyToken from "../middlewares/verifyToken.js";
 import isAdmin from "../middlewares/isAdmin.js"; // kalau kamu punya sistem role
-import multer from "multer";
+import { upload } from "../middlewares/upload.js";
 
 const router = express.Router();
-const upload = multer();
 
 router.get("/", getProducts);
-router.post("/", verifyToken, isAdmin, upload.single("image"), createProduct);
-router.put("/:id", verifyToken, isAdmin, upload.single("image"), updateProduct);
+router.post("/", verifyToken, isAdmin, upload.array("images"), createProduct);
+router.put("/:id", verifyToken, isAdmin, upload.array("images"), updateProduct);
 router.delete("/:id", verifyToken, isAdmin, deleteProduct);
 
 export default router;
