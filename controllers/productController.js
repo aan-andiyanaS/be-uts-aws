@@ -24,7 +24,7 @@ const uploadToS3 = async (file) => {
       Key: key,
       Body: file.buffer,
       ContentType: file.mimetype,
-      ACL: "public-read",
+      // ACL: "public-read",
     })
   );
 
@@ -52,6 +52,57 @@ const deleteFromS3 = async (url) => {
     })
   );
 };
+
+const ensureCleanupTable = async () => {
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS image_cleanup_queue (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      image_url TEXT NOT NULL,
+      delete_after DATETIME NOT NULL
+    )
+  `);
+};
+
+const enqueueImageForDeletion = async (url, days = 30) => {
+  if (!url) return;
+  const deleteAfter = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+  await db.execute(
+    "INSERT INTO image_cleanup_queue (image_url, delete_after) VALUES (?, ?)",
+    [url, deleteAfter]
+  );
+};
+
+const processExpiredImages = async () => {
+  const [rows] = await db.execute(
+    "SELECT id, image_url FROM image_cleanup_queue WHERE delete_after <= NOW() LIMIT 50"
+  );
+
+  if (!rows.length) return;
+
+  for (const row of rows) {
+    try {
+      await deleteFromS3(row.image_url);
+    } catch (err) {
+      console.error("Failed delete from S3:", err?.message || err);
+    }
+  }
+
+  const ids = rows.map((r) => r.id);
+  await db.execute(
+    `DELETE FROM image_cleanup_queue WHERE id IN (${ids
+      .map(() => "?")
+      .join(",")})`,
+    ids
+  );
+};
+
+ensureCleanupTable()
+  .then(() => processExpiredImages().catch(() => {}))
+  .catch((err) => console.error("Failed init cleanup table", err));
+
+setInterval(() => {
+  processExpiredImages().catch(() => {});
+}, 60 * 60 * 1000);
 
 const normalizeImages = (value) => {
   if (!value) return [];
@@ -129,6 +180,14 @@ export const updateProduct = async (req, res) => {
     if (req.files && req.files.length) {
       imageUrls = await Promise.all(req.files.map(uploadToS3));
     }
+
+    // Antri penghapusan gambar yang tidak dipakai lagi (hapus permanen 30 hari kemudian)
+    const removedImages = existingImages.filter(
+      (img) => !imageUrls.includes(img)
+    );
+    await Promise.all(
+      removedImages.map((img) => enqueueImageForDeletion(img, 30))
+    );
 
     await db.execute(
       "UPDATE products SET title=?, caption=?, price=?, image_url=? WHERE id=?",
